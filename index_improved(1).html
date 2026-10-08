@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>写真対応 給料計算機</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f3f5f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#20252a;padding:16px}
+main{max-width:720px;margin:auto}
+.card{background:#fff;border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 3px 14px #0001}
+h1{font-size:24px;margin:4px 0 16px}
+h2{font-size:18px;margin:0 0 12px}
+label{display:block;font-size:13px;color:#606870;margin:8px 0 5px}
+input,button{font:inherit}
+input[type=number],input[type=time],input[type=date]{width:100%;padding:11px;border:1px solid #ccd2d8;border-radius:10px;font-size:16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{border:0;border-radius:10px;padding:11px 14px;cursor:pointer}
+.primary{background:#111;color:#fff;width:100%;margin-top:10px}
+.secondary{background:#e9edf1}
+.danger{background:#ffe7e7;color:#9b0000}
+.file{display:block;border:2px dashed #c8ced5;border-radius:12px;padding:18px;text-align:center;cursor:pointer}
+.file input{display:none}
+.preview{max-width:100%;max-height:320px;display:block;margin:12px auto;border-radius:10px}
+.status{font-size:13px;color:#626a72;margin-top:8px}
+.row{border:1px solid #e1e5e9;border-radius:12px;padding:12px;margin:10px 0}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.result{font-size:28px;font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
+.note{font-size:12px;color:#666;line-height:1.5}
+@media(max-width:430px){.grid{grid-template-columns:1fr}.result{font-size:24px}}
+</style>
+</head>
+<body>
+<main>
+<h1>💰 写真対応 給料計算機</h1>
+
+<section class="card">
+<h2>① 給料設定</h2>
+<div class="grid">
+<div><label>基本時給（8:00以降）</label><input id="base" type="number" value="1140"></div>
+<div><label>8:00より前</label><input id="early" type="number" value="1425"></div>
+<div><label>土日祝の加算</label><input id="weekend" type="number" value="0"></div>
+<div><label>休憩（各勤務・分）</label><input id="break" type="number" value="0"></div>
+</div>
+</section>
+
+<section class="card">
+<h2>② 勤務表の写真を読み取る</h2>
+<label class="file">
+  <input id="photo" type="file" accept="image/*">
+  📷 写真を選択
+</label>
+<img id="preview" class="preview" hidden>
+<div class="actions">
+<button id="ocr" class="primary" type="button" disabled>写真から時刻を読み取る</button>
+</div>
+<div id="status" class="status">写真を選ぶと読み取りできます。</div>
+<p class="note">読み取り結果は必ず確認してください。印字が薄い・傾いている・影がある写真ではOCRが間違えることがあります。</p>
+</section>
+
+<section class="card">
+<h2>③ 読み取った勤務時間</h2>
+<div id="rows"></div>
+<button id="add" class="secondary" type="button">＋ 勤務日を追加</button>
+<button id="calc" class="primary" type="button">給料を計算する</button>
+</section>
+
+<section id="result" class="card" hidden></section>
+</main>
+
+<script type="module">
+const $=s=>document.querySelector(s);
+const rows=$("#rows"), photo=$("#photo"), preview=$("#preview"), ocr=$("#ocr"), status=$("#status");
+let selectedFile=null;
+
+function addRow(start="",end="",date=""){
+  const d=document.createElement("div");
+  d.className="row";
+  d.innerHTML=`
+    <div class="grid">
+      <div><label>日付（任意）</label><input class="date" type="date" value="${date}"></div>
+      <div><label>出勤</label><input class="start" type="time" value="${start}"></div>
+      <div><label>退勤</label><input class="end" type="time" value="${end}"></div>
+    </div>
+    <button class="danger remove" type="button" style="margin-top:10px">削除</button>`;
+  d.querySelector(".remove").addEventListener("click",()=>d.remove());
+  rows.appendChild(d);
+}
+addRow();
+
+photo.addEventListener("change",()=>{
+  selectedFile=photo.files?.[0]||null;
+  if(!selectedFile){ocr.disabled=true;return}
+  preview.src=URL.createObjectURL(selectedFile);
+  preview.hidden=false;
+  ocr.disabled=false;
+  status.textContent="写真を選択しました。「写真から時刻を読み取る」を押してください。";
+});
+
+function normalizeText(s){
+  return String(s)
+    .replace(/[：;]/g,":")
+    .replace(/[OoО]/g,"0")
+    .replace(/[Il|]/g,"1")
+    .replace(/[Ｓ]/g,"5")
+    .replace(/[Ｂ]/g,"8")
+    .replace(/[，,]/g,".")
+    .replace(/\u00a0/g," ");
+}
+
+function extractTimes(text){
+  const t=normalizeText(text);
+  const found=[];
+  let m;
+  // 12:34 / 7:05 / 07.05
+  const re=/(?:^|\s|[^0-9])([01]?\d|2[0-3])\s*[:.]\s*([0-5]\d)(?=$|\s|[^0-9])/g;
+  while((m=re.exec(t))){
+    const v=`${String(Number(m[1])).padStart(2,"0")}:${m[2]}`;
+    if(!found.includes(v)) found.push(v);
+  }
+  // OCRがコロンを落とした場合の補助
+  const compact=/(?:^|\s|[^0-9])([01]\d|2[0-3])\s*([0-5]\d)(?=$|\s|[^0-9])/g;
+  while((m=compact.exec(t))){
+    const v=`${m[1]}:${m[2]}`;
+    if(!found.includes(v)) found.push(v);
+  }
+  return found;
+}
+
+// 写真を拡大＋グレースケール＋コントラスト補正してOCR用画像を作る。
+async function makeOcrCanvas(file){
+  const img=await new Promise((resolve,reject)=>{
+    const i=new Image();
+    i.onload=()=>resolve(i);
+    i.onerror=reject;
+    i.src=URL.createObjectURL(file);
+  });
+  const scale=Math.min(2.5, 1800/Math.max(img.width,img.height));
+  const w=Math.max(1200,Math.round(img.width*scale));
+  const h=Math.max(900,Math.round(img.height*scale));
+  const c=document.createElement("canvas");
+  c.width=w;c.height=h;
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality="high";
+  ctx.drawImage(img,0,0,w,h);
+  const im=ctx.getImageData(0,0,w,h), d=im.data;
+  for(let i=0;i<d.length;i+=4){
+    const g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+    const v=Math.max(0,Math.min(255,(g-128)*1.35+128));
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(im,0,0);
+  return c;
+}
+
+ocr.addEventListener("click",async()=>{
+  if(!selectedFile)return;
+  ocr.disabled=true;
+  try{
+    status.textContent="OCRエンジンを読み込んでいます…";
+    const mod=await import("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/+esm");
+    const worker=await mod.createWorker("eng",1,{
+      logger:m=>{
+        if(m.status==="recognizing text"){
+          status.textContent=`写真を読み取り中… ${Math.round((m.progress||0)*100)}%`;
+        }else if(m.status==="loading language"){
+          status.textContent="OCRの言語データを準備中…";
+        }
+      }
+    });
+
+    // 勤務表は時刻が中心なので、数字・時刻記号に絞る。
+    await worker.setParameters({
+      tessedit_char_whitelist:"0123456789:.-/ ",
+      preserve_interword_spaces:"1"
+    });
+
+    const canvas=await makeOcrCanvas(selectedFile);
+
+    // 元画像＋補正画像の2回を読み、片方の誤認識に依存しない。
+    status.textContent="元の写真を読み取り中…";
+    const r1=await worker.recognize(selectedFile,{rotateAuto:true});
+    status.textContent="写真を補正して再読み取り中…";
+    const r2=await worker.recognize(canvas,{rotateAuto:true});
+    await worker.terminate();
+
+    const times=[...new Set([
+      ...extractTimes(r1.data.text||""),
+      ...extractTimes(r2.data.text||"")
+    ])];
+
+    if(times.length<2){
+      status.textContent="時刻を十分に読み取れませんでした。机の上で真上から、影を少なくして撮ると改善しやすいです。";
+      return;
+    }
+
+    rows.innerHTML="";
+    for(let i=0;i+1<times.length;i+=2) addRow(times[i],times[i+1]);
+    status.textContent=`${Math.floor(times.length/2)}件の候補を読み取りました。⚠️ 時刻は必ず確認してください。`;
+  }catch(e){
+    console.error(e);
+    status.textContent="OCRの読み込みに失敗しました。Wi‑Fi/4G接続を確認して、もう一度試してください。";
+  }finally{
+    ocr.disabled=false;
+  }
+});
+
+$("#add").addEventListener("click",()=>addRow());
+
+function mins(v){const [h,m]=v.split(":").map(Number);return h*60+m}
+function yen(v){return Math.round(v).toLocaleString("ja-JP")+"円"}
+
+$("#calc").addEventListener("click",()=>{
+  const base=Math.max(0,Number($("#base").value)||0);
+  const early=Math.max(0,Number($("#early").value)||0);
+  const weekend=Math.max(0,Number($("#weekend").value)||0);
+  const breakMin=Math.max(0,Number($("#break").value)||0);
+  let total=0,totalMin=0,earlyMin=0,normalMin=0, count=0;
+  const out=[`<h2>④ 計算結果</h2><table><tr><th>日付</th><th>勤務時間</th><th>給料</th></tr>`];
+
+  rows.querySelectorAll(".row").forEach(r=>{
+    const s=r.querySelector(".start").value,e=r.querySelector(".end").value,d=r.querySelector(".date").value;
+    if(!s||!e)return;
+    let a=mins(s),b=mins(e);
+    if(b<a)b+=1440;
+    let work=Math.max(0,b-a-breakMin);
+    // 8:00までの時間を算出
+    const earlyEnd=480+(a>=1440?1440:0);
+    let ep=Math.max(0,Math.min(b,earlyEnd)-a);
+    ep=Math.min(ep,work);
+    const np=work-ep;
+    const day=d?new Date(d+"T12:00:00").getDay():-1;
+    const add=(day===0||day===6)?weekend:0;
+    const pay=ep*(early+add)/60+np*(base+add)/60;
+    total+=pay;totalMin+=work;earlyMin+=ep;normalMin+=np;count++;
+    out.push(`<tr><td>${d||"—"}</td><td>${Math.floor(work/60)}時間${work%60}分</td><td>${yen(pay)}</td></tr>`);
+  });
+  out.push(`</table><p class="result">${total.toLocaleString("ja-JP",{maximumFractionDigits:2})}円</p>
+  <p class="note">勤務日数：${count}日<br>総労働時間：${Math.floor(totalMin/60)}時間${totalMin%60}分<br>
+  8:00前：${Math.floor(earlyMin/60)}時間${earlyMin%60}分 ／ 8:00以降：${Math.floor(normalMin/60)}時間${normalMin%60}分</p>`);
+  const box=$("#result");box.innerHTML=out.join("");box.hidden=false;
+});
+</script>
+</body>
+</html>
